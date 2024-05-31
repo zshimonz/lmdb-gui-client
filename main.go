@@ -2,19 +2,23 @@ package main
 
 import (
 	"encoding/json"
+	"math"
 	"strings"
 	"time"
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/app"
+	"fyne.io/fyne/v2/canvas"
 	"fyne.io/fyne/v2/container"
+	"fyne.io/fyne/v2/data/binding"
 	"fyne.io/fyne/v2/dialog"
+	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 	"github.com/bmatsuo/lmdb-go/lmdb"
 	"github.com/go-gl/glfw/v3.3/glfw"
 
 	"github.com/zshimonz/lmdb-gui-client/config"
-	"github.com/zshimonz/lmdb-gui-client/theme"
+	mytheme "github.com/zshimonz/lmdb-gui-client/theme"
 )
 
 var env *lmdb.Env
@@ -24,14 +28,37 @@ var selectedKey string
 var windowWidth float32
 var windowHeight float32
 var connectionList *widget.List
-var keyList *widget.List
+var keyValueTable *widget.Table
+
 var valueView *widget.Entry
 var selectedConnectionIndex = -1
+var valueLabelString = binding.NewString()
 
 var connectionsPanel *fyne.Container
 var valuePanel *fyne.Container
 var leftMainSplit *container.Split
-var mainValueSplit *container.Split
+
+var valuePanelOpen = false
+var connectionPanelOpen = true
+
+var logMessage = binding.NewString()
+var valueSplitOffset = 0.6
+
+var darkMode = true
+var logText *canvas.Text
+
+var tabTitle = binding.NewString()
+var tabView *fyne.Container
+
+var newConnectionTabItem *fyne.Container
+var editConnectionTabItem *fyne.Container
+var newKeyValesTabItem *fyne.Container
+var keyValuesTabItem *container.Split
+
+var editConnectionNameEntry *widget.Entry
+var editConnectionPathEntry *widget.Entry
+var editConnectionIndex int
+var toggleConnectionsButton *widget.Button
 
 type KeyValue struct {
 	Key   string
@@ -41,15 +68,22 @@ type KeyValue struct {
 func main() {
 	a := app.New()
 
-	// 加载嵌入的字体
-	customTheme := &theme.MyTheme{}
-	a.Settings().SetTheme(customTheme)
+	lightTheme := &mytheme.MyLightTheme{}
+	darkTheme := &mytheme.MyDarkTheme{}
+
+	a.Settings().SetTheme(darkTheme)
 
 	w := a.NewWindow("LMDB GUI Client")
 
-	err := config.LoadConfig()
+	// set window icon
+	iconResource, err := fyne.LoadResourceFromPath("icon.png")
+	if err == nil {
+		w.SetIcon(iconResource)
+	}
+
+	err = config.LoadConfig()
 	if err != nil {
-		showLogPopup(a, w, "ERROR", "Error loading config: "+err.Error())
+		showErrorLog("Error loading config: " + err.Error())
 	}
 
 	// 左侧布局：Connection 列表
@@ -57,180 +91,266 @@ func main() {
 		func() int { return len(config.Config.Connections) },
 		func() fyne.CanvasObject {
 			label := widget.NewLabel("")
-			editButton := widget.NewButton("Edit", func() {})
-			deleteButton := widget.NewButton("Delete", func() {})
-			return container.NewHBox(label, editButton, deleteButton)
+			label.Alignment = fyne.TextAlignLeading
+			toolbar := widget.NewToolbar(
+				widget.NewToolbarAction(theme.DocumentCreateIcon(), func() {}),
+				widget.NewToolbarAction(theme.DeleteIcon(), func() {}),
+				widget.NewToolbarAction(theme.ContentClearIcon(), func() { connectionList.UnselectAll() }),
+			)
+
+			return container.NewGridWithColumns(2, label, toolbar)
 		},
 		func(i widget.ListItemID, o fyne.CanvasObject) {
 			label := o.(*fyne.Container).Objects[0].(*widget.Label)
 			label.SetText(config.Config.Connections[i].Name)
 
-			editButton := o.(*fyne.Container).Objects[1].(*widget.Button)
-			editButton.OnTapped = func() {
-				showEditConnectionWindow(a, w, i, connectionList)
+			toolbar := o.(*fyne.Container).Objects[1].(*widget.Toolbar)
+			editButton := toolbar.Items[0].(*widget.ToolbarAction)
+			editButton.OnActivated = func() {
+				if selectedConnectionIndex == i {
+					connectionList.UnselectAll()
+				}
+				showEditConnectionTabItem()
+				editConnectionIndex = i
+				toggleConnectionsButton.Disable()
 			}
-
-			deleteButton := o.(*fyne.Container).Objects[2].(*widget.Button)
-			deleteButton.OnTapped = func() {
-				deleteConnection(a, w, i, connectionList)
+			deleteButton := toolbar.Items[1].(*widget.ToolbarAction)
+			deleteButton.OnActivated = func() {
+				if selectedConnectionIndex == i {
+					connectionList.UnselectAll()
+				}
+				// show confirm dialog
+				dialog.ShowConfirm("Delete Connection", "Are you sure you want to delete this connection?", func(b bool) {
+					if b {
+						deleteConnection(i, connectionList)
+						if selectedConnectionIndex == i {
+							selectedConnectionIndex = -1
+							keyValueTable.UnselectAll()
+						}
+					}
+				}, w)
 			}
+			toolbar.Refresh()
 		},
 	)
 
 	connectionList.OnSelected = func(id widget.ListItemID) {
 		selectedConnectionIndex = id
-		connectToDB(a, w, selectedConnectionIndex, keyList, valueView)
+		connectToDB(selectedConnectionIndex)
 		// hide mainValueSplit
-		mainValueSplit.Hidden = false
+		keyValuesTabItem.Hidden = false
 	}
 
 	connectionList.OnUnselected = func(id widget.ListItemID) {
 		selectedConnectionIndex = -1
 		// show mainValueSplit
-		mainValueSplit.Hidden = true
+		keyValuesTabItem.Hidden = true
+		keyValueTable.UnselectAll()
 	}
 
 	// 主下侧布局：Value 多功能区
-	valueLabel := widget.NewLabel("Value")
+	valueLabel := widget.NewLabelWithData(valueLabelString)
+	valueLabel.TextStyle = fyne.TextStyle{Bold: true}
+
+	hideButton := widget.NewButtonWithIcon("Hide", theme.ContentRemoveIcon(), func() {
+		if selectedKey != "" {
+			toggleValue()
+			keyValueTable.UnselectAll()
+		}
+	})
 
 	valueView = widget.NewMultiLineEntry()
 	valueView.Wrapping = fyne.TextWrapWord
 
-	updateButton := widget.NewButton("Update", func() {
+	updateButton := widget.NewButtonWithIcon("Update", theme.ConfirmIcon(), func() {
 		if selectedKey != "" {
-			insertOrUpdateKeyValue(a, w, selectedKey, valueView.Text, keyList)
-			toggleValue()
-			valueView.Hidden = true
+			insertOrUpdateKeyValue(selectedKey, valueView.Text)
+			keyValueTable.UnselectAll()
 		}
 	})
 
-	deleteButton := widget.NewButton("Delete", func() {
+	deleteButton := widget.NewButtonWithIcon("Delete", theme.DeleteIcon(), func() {
 		if selectedKey != "" {
-			deleteKeyValue(a, w, selectedKey, keyList)
-			toggleValue()
-			valueView.Hidden = true
+			deleteKeyValue(selectedKey)
+			keyValueTable.UnselectAll()
 		}
 	})
 
-	cancelButton := widget.NewButton("Cancel", func() {
-		toggleValue()
-		valueView.Hidden = true
+	cancelButton := widget.NewButtonWithIcon("Cancel", theme.CancelIcon(), func() {
+		keyValueTable.UnselectAll()
 	})
 
 	valueControls := container.NewGridWithColumns(3, updateButton, deleteButton, cancelButton)
-	valuePanel = container.NewBorder(valueLabel, valueControls, nil, nil, valueView)
+	valuePanel = container.NewBorder(container.NewBorder(nil, nil, valueLabel, hideButton, nil), valueControls, nil, nil, valueView)
 	valuePanel.Hidden = true
 
-	// 中间布局：Key 列表
-	keyList = widget.NewList(
-		func() int { return len(keyValues) },
-		func() fyne.CanvasObject { return widget.NewLabel("") },
-		func(i widget.ListItemID, o fyne.CanvasObject) {
+	keyValueTable = widget.NewTableWithHeaders(
+		func() (int, int) {
+			return len(keyValues), 2
+		},
+		func() fyne.CanvasObject {
+			newLabel := widget.NewLabel("")
+			newLabel.Alignment = fyne.TextAlignCenter
+			return newLabel
+		},
+		func(i widget.TableCellID, o fyne.CanvasObject) {
 			label := o.(*widget.Label)
-			label.Alignment = fyne.TextAlignLeading
-			displayText := keyValues[i].Key
-			if len(keyValues[i].Value) > 0 {
-				displayText += ": " + strings.ReplaceAll(keyValues[i].Value, "\n", " ")
+			if i.Col == 0 {
+				label.SetText(keyValues[i.Row].Key)
+			} else { // 1
+				label.SetText(keyValues[i.Row].Value)
 			}
-			label.SetText(displayText)
 		},
 	)
 
-	keyList.OnSelected = func(id widget.ListItemID) {
-		selectedKey = keyValues[id].Key
-		refreshValueView(a, w, valueView)
+	keyValueTable.OnSelected = func(id widget.TableCellID) {
+		if id.Row < 0 || id.Row >= len(keyValues) || id.Col < 0 {
+			return
+		}
+		selectedKey = keyValues[id.Row].Key
+		if err := valueLabelString.Set("Value for: " + selectedKey); err != nil {
+			return
+		}
+		refreshValueView(valueView)
 		// 如果 Value 多功能区是关闭的，则打开
-		if mainValueSplit.Offset == 1.0 {
+		if !valuePanelOpen {
 			toggleValue()
 		}
 		valuePanel.Hidden = false
+		valuePanelOpen = true
 	}
 
-	keyList.OnUnselected = func(id widget.ListItemID) {
+	keyValueTable.OnUnselected = func(id widget.TableCellID) {
 		selectedKey = ""
+		err := valueLabelString.Set("Value for: " + selectedKey)
+		if err != nil {
+			return
+		}
 		valueView.SetText("")
-		if mainValueSplit.Offset == 0.6 {
+		if valuePanelOpen {
 			toggleValue()
 		}
 		valuePanel.Hidden = true
+		valuePanelOpen = false
 	}
+
+	keyValueTable.UpdateHeader = func(id widget.TableCellID, template fyne.CanvasObject) {
+		label := template.(*widget.Label)
+		if id.Col == 0 {
+			label.SetText("Key")
+		} else {
+			label.SetText("Value")
+		}
+	}
+	// update column header
+	keyValueTable.ShowHeaderColumn = false
 
 	keyPrefixEntry := widget.NewEntry()
 	keyPrefixEntry.SetPlaceHolder("Key prefix filter")
 	keyPrefixEntry.OnSubmitted = func(s string) {
-		loadKeys(a, w, keyList, s)
+		connectToDB(selectedConnectionIndex)
+		loadKeyValues(s)
 	}
 
 	keyPrefixLabel := widget.NewLabel("Key Prefix:")
 	keyPrefixLabel.Alignment = fyne.TextAlignLeading
 
-	keyPrefixBroder := container.NewBorder(nil, nil, keyPrefixLabel, nil, keyPrefixEntry)
+	keyPrefixIcon := widget.NewIcon(theme.SearchIcon())
+	keyPrefixLabels := container.NewHBox(keyPrefixIcon, keyPrefixLabel)
 
-	refreshKeysButton := widget.NewButton("Refresh Keys", func() {
-		loadKeys(a, w, keyList, keyPrefixEntry.Text)
+	refreshKeysButton := widget.NewButtonWithIcon("Refresh", theme.ViewRefreshIcon(), func() {
+		connectToDB(selectedConnectionIndex)
+		loadKeyValues(keyPrefixEntry.Text)
+		showInfoLog("Keys refreshed!")
+		keyValueTable.UnselectAll()
 	})
 
-	newKeyButton := widget.NewButton("New Key", func() {
-		showNewKeyWindow(a, w, keyList)
+	unselectKeysButton := widget.NewButtonWithIcon("Unselect", theme.ContentUndoIcon(), func() {
+		keyValueTable.UnselectAll()
 	})
 
-	keysLabel := widget.NewLabel("Key Values")
-	keysLabel.TextStyle = fyne.TextStyle{Bold: true}
-	keysLabel.Alignment = fyne.TextAlignCenter
+	newKeyButton := widget.NewButtonWithIcon("New", theme.ContentAddIcon(), func() {
+		showNewKeyValesTabItem()
+	})
 
-	autoRefreshCheckbox := widget.NewCheck("Auto Refresh", nil)
+	err = tabTitle.Set("Key Values")
+	if err != nil {
+		return
+	}
+	tabTitleLabel := widget.NewLabelWithData(tabTitle)
+	tabTitleLabel.TextStyle = fyne.TextStyle{Bold: true}
+	tabTitleLabel.Alignment = fyne.TextAlignCenter
+
+	autoRefreshCheckbox := widget.NewCheck("Auto Refresh (5s)", nil)
 	autoRefreshCheckbox.Checked = false
 	go func() {
 		for {
 			time.Sleep(5 * time.Second)
 			if connectionList.Length() != 0 && selectedConnectionIndex != -1 && autoRefreshCheckbox.Checked {
 				// reconnect to db
-				connectToDB(a, w, selectedConnectionIndex, keyList, valueView)
-				loadKeys(a, w, keyList, keyPrefixEntry.Text)
-				keyList.UnselectAll()
+				connectToDB(selectedConnectionIndex)
+				loadKeyValues(keyPrefixEntry.Text)
+				keyValueTable.UnselectAll()
 
-				showLogPopup(a, w, "INFO", "Auto Refresh success!")
+				showInfoLog("Auto Refresh success!")
 			}
 		}
 	}()
 
-	refreshNewGrid := container.NewGridWithColumns(2, refreshKeysButton, newKeyButton)
+	refreshUnselectNewGrid := container.NewGridWithColumns(4, newKeyButton, unselectKeysButton, refreshKeysButton, container.NewCenter(autoRefreshCheckbox))
 
 	// 添加标题栏左侧的两个按钮
-	toggleConnectionsButton := widget.NewButton("Toggle Connections", toggleConnections)
-	toggleValueButton := widget.NewButton("Toggle Value", toggleValue)
-	toolbar := container.NewHBox(toggleConnectionsButton, toggleValueButton)
-
-	keysControls := container.NewBorder(nil, nil, toolbar, autoRefreshCheckbox, keysLabel)
-	keyControls := container.NewVBox(keysControls, keyPrefixBroder, refreshNewGrid)
-	keyListContainer := container.NewBorder(keyControls, nil, nil, nil, keyList)
-
-	connectionsPanel = container.NewBorder(
-		nil,
-		nil,
-		nil,
-		nil,
-		connectionList,
-	)
-
-	connectButton := widget.NewButton("New Connection", func() {
-		showConnectWindow(a, w, connectionList)
+	toggleConnectionsButton = widget.NewButtonWithIcon("Connections", theme.MenuIcon(), toggleConnections)
+	switchThemeButton := widget.NewButtonWithIcon("Dark/Light", theme.ViewRefreshIcon(), func() {
+		if darkMode {
+			a.Settings().SetTheme(lightTheme)
+			darkMode = false
+		} else {
+			a.Settings().SetTheme(darkTheme)
+			darkMode = true
+		}
+		logText.Color = theme.ForegroundColor()
 	})
-	connectionsPanel = container.NewBorder(connectButton, nil, nil, nil, connectionsPanel)
+
+	keyPrefixes := container.NewBorder(nil, nil, keyPrefixLabels, nil, keyPrefixEntry)
+	keyValuesControls := container.NewBorder(nil, refreshUnselectNewGrid, nil, nil, keyPrefixes)
+	keyValuesList := container.NewBorder(keyValuesControls, nil, nil, nil, keyValueTable)
+
+	connectConnectionButton := widget.NewButtonWithIcon("New Connection", theme.ContentAddIcon(), func() {
+		showNewConnectionTabItem()
+	})
+
+	connectionsLabel := widget.NewLabel("Connections")
+	connectionsLabel.TextStyle = fyne.TextStyle{Bold: true}
+	connectionsLabel.Alignment = fyne.TextAlignCenter
+
+	connectionsPanel = container.NewBorder(connectionsLabel, connectConnectionButton, nil, nil, connectionList)
 
 	// 创建主拆分器，将 Key Values列表和 Value 多功能区组合在一起
-	mainValueSplit = container.NewVSplit(keyListContainer, valuePanel)
-	mainValueSplit.Offset = 1.0
-	mainValueSplit.Trailing = container.NewVBox()
-	mainValueSplit.Hidden = true
+	keyValuesTabItem = container.NewVSplit(keyValuesList, valuePanel)
+	keyValuesTabItem.Offset = 1.0
+	keyValuesTabItem.Trailing = container.NewVBox()
+	keyValuesTabItem.Hidden = true
+
+	newKeyValesTabItem = initNewKeyValuesTableItem()
+
+	newConnectionTabItem = initNewConnectionTabItem(w)
+
+	editConnectionTabItem = initEditConnectionTabItem(w)
+
+	tabTitles := container.NewBorder(nil, nil, toggleConnectionsButton, switchThemeButton, tabTitleLabel)
+
+	tabView = container.NewStack(keyValuesTabItem, newConnectionTabItem, newKeyValesTabItem, editConnectionTabItem)
+
+	tabContent := container.NewBorder(tabTitles, nil, nil, nil, tabView)
 
 	// 创建主布局，将左侧面板和主拆分器组合在一起
-	leftMainSplit = container.NewHSplit(connectionsPanel, mainValueSplit)
+	leftMainSplit = container.NewHSplit(connectionsPanel, tabContent)
 	leftMainSplit.Offset = 0.15
 
 	err = glfw.Init()
 	if err != nil {
-		showLogPopup(a, w, "ERROR", "Error initializing GLFW: "+err.Error())
+		showErrorLog("Error initializing GLFW: " + err.Error())
 		return
 	}
 	monitor := glfw.GetPrimaryMonitor()
@@ -238,13 +358,21 @@ func main() {
 	screenWidth := float32(mode.Width)
 	screenHeight := float32(mode.Height)
 	windowWidth = screenWidth / 4 * 3
+	windowWidth = float32(math.Min(float64(windowWidth), 1400))
 	windowHeight = screenHeight / 4 * 3
-	w.SetContent(leftMainSplit)
+	windowHeight = float32(math.Min(float64(windowHeight), 800))
+
+	// set log labels in the bottom
+	logLabel := newLogLabel(logMessage)
+	bottomPanel := container.NewBorder(widget.NewSeparator(), nil, nil, logLabel)
+	mainContent := container.NewBorder(nil, bottomPanel, nil, nil, leftMainSplit)
+
+	w.SetContent(mainContent)
 	w.Resize(fyne.NewSize(windowWidth, windowHeight))
 	w.ShowAndRun()
 }
 
-func refreshValueView(a fyne.App, w fyne.Window, valueView *widget.Entry) {
+func refreshValueView(valueView *widget.Entry) {
 	err := env.View(func(txn *lmdb.Txn) error {
 		val, err := txn.Get(dbi, []byte(selectedKey))
 		if err != nil {
@@ -261,22 +389,22 @@ func refreshValueView(a fyne.App, w fyne.Window, valueView *widget.Entry) {
 		return nil
 	})
 	if err != nil {
-		showLogPopup(a, w, "ERROR", "Error fetching value: "+err.Error())
+		showErrorLog("Error fetching value: " + err.Error())
 	}
 }
 
-func deleteConnection(a fyne.App, w fyne.Window, connectionIndex int, connectionList *widget.List) {
+func deleteConnection(connectionIndex int, connectionList *widget.List) {
 	config.Config.Connections = append(config.Config.Connections[:connectionIndex], config.Config.Connections[connectionIndex+1:]...)
 	err := config.SaveConfig()
 	if err != nil {
-		showLogPopup(a, w, "ERROR", "Error saving config: "+err.Error())
+		showErrorLog("Error saving config: " + err.Error())
 	}
 	connectionList.Refresh()
 }
 
-func connectToDB(a fyne.App, w fyne.Window, connectionIndex int, keyList *widget.List, valueView *widget.Entry) {
+func connectToDB(connectionIndex int) {
 	if len(config.Config.Connections) == 0 {
-		showLogPopup(a, w, "ERROR", "No database path configured")
+		showErrorLog("No database path configured")
 		return
 	}
 	connection := config.Config.Connections[connectionIndex]
@@ -284,24 +412,24 @@ func connectToDB(a fyne.App, w fyne.Window, connectionIndex int, keyList *widget
 	var err error
 	env, err = lmdb.NewEnv()
 	if err != nil {
-		showLogPopup(a, w, "ERROR", "Error creating LMDB environment: "+err.Error())
+		showErrorLog("Error creating LMDB environment: " + err.Error())
 		return
 	}
 
 	err = env.SetMapSize(1 << 30 * 100)
 	if err != nil {
-		showLogPopup(a, w, "ERROR", "Error setting LMDB map size: "+err.Error())
+		showErrorLog("Error setting LMDB map size: " + err.Error())
 		return
 	}
 
-	err = env.SetMaxDBs(1)
+	err = env.SetMaxDBs(0)
 	if err != nil {
-		showLogPopup(a, w, "ERROR", "Error setting LMDB max DBs: "+err.Error())
+		showErrorLog("Error setting LMDB max DBs: " + err.Error())
 		return
 	}
 	err = env.Open(connection.DatabasePath, 0, 0664)
 	if err != nil {
-		showLogPopup(a, w, "ERROR", "Error opening LMDB database: "+err.Error())
+		showErrorLog("Error opening LMDB database: " + err.Error())
 		return
 	}
 	err = env.Update(func(txn *lmdb.Txn) (err error) {
@@ -309,15 +437,15 @@ func connectToDB(a fyne.App, w fyne.Window, connectionIndex int, keyList *widget
 		return err
 	})
 	if err != nil {
-		showLogPopup(a, w, "ERROR", "Error opening LMDB root: "+err.Error())
+		showErrorLog("Error opening LMDB root: " + err.Error())
 		return
 	}
-	showLogPopup(a, w, "INFO", "Database connected")
+	showInfoLog("Database connected")
 
-	loadKeys(a, w, keyList, "")
+	loadKeyValues("")
 }
 
-func loadKeys(a fyne.App, w fyne.Window, keyList *widget.List, keyPrefix string) {
+func loadKeyValues(keyPrefix string) {
 	err := env.View(func(txn *lmdb.Txn) error {
 		cur, err := txn.OpenCursor(dbi)
 		if err != nil {
@@ -333,105 +461,142 @@ func loadKeys(a fyne.App, w fyne.Window, keyList *widget.List, keyPrefix string)
 			}
 			if keyPrefix == "" || len(key) >= len(keyPrefix) && string(key[:len(keyPrefix)]) == keyPrefix {
 				displayVal := string(val)
-				if len(displayVal) > 50 {
-					displayVal = displayVal[:50] + "..."
+				if len(displayVal) > 30 {
+					displayVal = displayVal[:30] + "..."
 				}
 				keyValues = append(keyValues, KeyValue{Key: string(key), Value: strings.ReplaceAll(displayVal, "\n", " ")})
 			}
 		}
-
-		keyList.Refresh()
+		keyValueTable.Refresh()
+		adaptiveColumnWidths()
 
 		return nil
 	})
 	if err != nil {
-		showLogPopup(a, w, "ERROR", "Error loading keys: "+err.Error())
+		showErrorLog("Error loading keys: " + err.Error())
 	}
 }
 
-func insertOrUpdateKeyValue(a fyne.App, w fyne.Window, key, value string, keyList *widget.List) {
+func insertOrUpdateKeyValue(key, value string) {
 	err := env.Update(func(txn *lmdb.Txn) error {
 		err := txn.Put(dbi, []byte(key), []byte(value), 0)
 		return err
 	})
 	if err != nil {
-		showLogPopup(a, w, "ERROR", "Error insert/update key-value: "+err.Error())
+		showErrorLog("Error insert/update key-value: " + err.Error())
 		return
 	}
-	showLogPopup(a, w, "INFO", "Key-Value inserted/updated")
+	showInfoLog("Key-Value inserted/updated")
 
-	loadKeys(a, w, keyList, "")
+	loadKeyValues("")
 }
 
-func deleteKeyValue(a fyne.App, w fyne.Window, key string, keyList *widget.List) {
+func deleteKeyValue(key string) {
 	err := env.Update(func(txn *lmdb.Txn) error {
 		err := txn.Del(dbi, []byte(key), nil)
 		return err
 	})
 	if err != nil {
-		showLogPopup(a, w, "ERROR", "Error deleting key-value: "+err.Error())
+		showErrorLog("Error deleting key-value: " + err.Error())
 		return
 	}
-	showLogPopup(a, w, "INFO", "Key-Value deleted")
+	showInfoLog("Key-Value deleted")
 
-	loadKeys(a, w, keyList, "")
+	loadKeyValues("")
 }
 
-func showEditConnectionWindow(a fyne.App, w fyne.Window, connectionIndex int, connectionList *widget.List) {
-	connection := config.Config.Connections[connectionIndex]
-	editWindow := a.NewWindow("Edit Connection")
-	nameEntry := widget.NewEntry()
-	nameEntry.SetText(connection.Name)
-	entry := widget.NewEntry()
-	entry.SetText(connection.DatabasePath)
+func initEditConnectionTabItem(w fyne.Window) *fyne.Container {
+	editConnectionNameEntry = widget.NewEntry()
+	editConnectionPathEntry = widget.NewEntry()
 
-	saveButton := widget.NewButton("Save", func() {
-		config.Config.Connections[connectionIndex].Name = nameEntry.Text
-		config.Config.Connections[connectionIndex].DatabasePath = entry.Text
-		err := config.SaveConfig()
-		if err != nil {
-			showLogPopup(a, w, "ERROR", "Error saving config: "+err.Error())
+	saveButton := widget.NewButtonWithIcon("Save", theme.DocumentSaveIcon(), func() {
+		if editConnectionNameEntry.Text == "" {
+			showErrorLog("Connection name cannot be empty")
+			return
 		}
-		editWindow.Close()
+		if editConnectionPathEntry.Text == "" {
+			showErrorLog("Database path cannot be empty")
+			return
+		}
+		// try to open the database to check if it exists
+		envTest, err := lmdb.NewEnv()
+		if err != nil {
+			showErrorLog("Error creating LMDB environment: " + err.Error())
+			return
+		}
+		err = envTest.Open(editConnectionPathEntry.Text, 0, 0664)
+		if err != nil {
+			showErrorLog("Error opening LMDB database: " + err.Error())
+			return
+		}
+		err = envTest.Close()
+		if err != nil {
+			showErrorLog("Error closing LMDB environment: " + err.Error())
+			return
+		}
+
+		config.Config.Connections[editConnectionIndex].Name = editConnectionNameEntry.Text
+		config.Config.Connections[editConnectionIndex].DatabasePath = editConnectionPathEntry.Text
+		err = config.SaveConfig()
+		if err != nil {
+			showErrorLog("Error saving config: " + err.Error())
+		}
 		connectionList.Refresh()
+
+		err = tabTitle.Set("Key Values")
+		if err != nil {
+			return
+		}
+		editConnectionTabItem.Hide()
+
+		// open the connections panel
+		toggleConnections()
+		toggleConnectionsButton.Enable()
 	})
 
-	browseButton := widget.NewButton("Browse", func() {
+	browseButton := widget.NewButtonWithIcon("Browse", theme.FolderOpenIcon(), func() {
 		fd := dialog.NewFolderOpen(func(file fyne.ListableURI, err error) {
 			if file != nil {
 				path := file.Path()
 				if path[len(path)-1] != '/' {
 					path += "/"
 				}
-				entry.SetText(path)
+				editConnectionPathEntry.SetText(path)
 			}
-		}, editWindow)
+		}, w)
+		fd.Resize(fyne.NewSize(windowWidth, windowHeight))
 		fd.Show()
+	})
+
+	cancelButton := widget.NewButtonWithIcon("Cancel", theme.CancelIcon(), func() {
+		err := tabTitle.Set("Key Values")
+		if err != nil {
+			return
+		}
+		editConnectionTabItem.Hide()
+		// open the connections panel
+		toggleConnections()
+		toggleConnectionsButton.Enable()
 	})
 
 	// 确保输入框尽可能大
-	content := container.NewBorder(
-		nameEntry, // top
-		container.NewVBox(browseButton, saveButton), // bottom
-		nil,   // left
-		nil,   // right
-		entry, // center
+	border := container.NewVBox(
+		editConnectionNameEntry,
+		container.NewBorder(nil, nil, nil, browseButton, editConnectionPathEntry),
+		container.NewGridWithColumns(2, saveButton, cancelButton),
 	)
-
-	editWindow.SetContent(content)
-	editWindow.Resize(fyne.NewSize(windowWidth/2, windowHeight/3))
-	editWindow.Show()
+	border.Hide()
+	return border
 }
 
-func showConnectWindow(a fyne.App, w fyne.Window, connectionList *widget.List) {
-	connectWindow := a.NewWindow("New Connection")
+func initNewConnectionTabItem(w fyne.Window) *fyne.Container {
 	nameEntry := widget.NewEntry()
 	nameEntry.SetPlaceHolder("Enter connection name")
-	entry := widget.NewMultiLineEntry()
+	entry := widget.NewEntry()
 	entry.SetPlaceHolder("Enter database path or use the button to browse")
 	entry.Wrapping = fyne.TextWrapWord
 
-	browseButton := widget.NewButton("Browse", func() {
+	browseButton := widget.NewButtonWithIcon("Browse", theme.FolderNewIcon(), func() {
 		fd := dialog.NewFolderOpen(func(file fyne.ListableURI, err error) {
 			if file != nil {
 				path := file.Path()
@@ -440,102 +605,271 @@ func showConnectWindow(a fyne.App, w fyne.Window, connectionList *widget.List) {
 				}
 				entry.SetText(path)
 			}
-		}, connectWindow)
+		}, w)
+		fd.Resize(fyne.NewSize(windowWidth, windowHeight))
 		fd.Show()
 	})
 
-	saveButton := widget.NewButton("Save", func() {
+	saveButton := widget.NewButtonWithIcon("Save", theme.DocumentSaveIcon(), func() {
+		if nameEntry.Text == "" {
+			showErrorLog("Connection name cannot be empty")
+			return
+		}
+		if entry.Text == "" {
+			showErrorLog("Database path cannot be empty")
+			return
+		}
+		// try to open the database to check if it exists
+		envTest, err := lmdb.NewEnv()
+		if err != nil {
+			showErrorLog("Error creating LMDB environment: " + err.Error())
+			return
+		}
+		err = envTest.Open(entry.Text, 0, 0664)
+		if err != nil {
+			showErrorLog("Error opening LMDB database: " + err.Error())
+			return
+		}
+		err = envTest.Close()
+		if err != nil {
+			showErrorLog("Error closing LMDB environment: " + err.Error())
+			return
+		}
+
 		config.Config.Connections = append(config.Config.Connections, config.ConnectionConfig{
 			Name:         nameEntry.Text,
 			DatabasePath: entry.Text,
 		})
-		err := config.SaveConfig()
+		err = config.SaveConfig()
 		if err != nil {
-			showLogPopup(a, w, "ERROR", "Error saving config: "+err.Error())
+			showErrorLog("Error saving config: " + err.Error())
 		}
-		connectWindow.Close()
 		connectionList.Refresh()
+
+		nameEntry.SetText("")
+		entry.SetText("")
+		err = tabTitle.Set("Key Values")
+		if err != nil {
+			return
+		}
+		newConnectionTabItem.Hide()
+	})
+
+	cancelButton := widget.NewButtonWithIcon("Cancel", theme.CancelIcon(), func() {
+		nameEntry.SetText("")
+		entry.SetText("")
+		err := tabTitle.Set("Key Values")
+		if err != nil {
+			return
+		}
+		newConnectionTabItem.Hide()
 	})
 
 	// 确保输入框尽可能大
-	content := container.NewBorder(
-		nameEntry, // top
-		container.NewVBox(browseButton, saveButton), // bottom
-		nil,   // left
-		nil,   // right
-		entry, // center
+	border := container.NewVBox(
+		nameEntry,
+		container.NewBorder(nil, nil, nil, browseButton, entry),
+		container.NewGridWithColumns(2, saveButton, cancelButton),
 	)
-
-	connectWindow.SetContent(content)
-	connectWindow.Resize(fyne.NewSize(windowWidth/2, windowHeight/3))
-	connectWindow.Show()
+	border.Hide()
+	return border
 }
 
-func showNewKeyWindow(a fyne.App, w fyne.Window, keyList *widget.List) {
-	newKeyWindow := a.NewWindow("New Key-Value")
+func initNewKeyValuesTableItem() *fyne.Container {
 	keyEntry := widget.NewEntry()
 	keyEntry.SetPlaceHolder("Enter key")
 	valueEntry := widget.NewMultiLineEntry()
 	valueEntry.SetPlaceHolder("Enter value")
 	valueEntry.Wrapping = fyne.TextWrapWord
 
-	saveButton := widget.NewButton("Save", func() {
-		insertOrUpdateKeyValue(a, w, keyEntry.Text, valueEntry.Text, keyList)
-		newKeyWindow.Close()
+	saveButton := widget.NewButtonWithIcon("Save", theme.DocumentSaveIcon(), func() {
+		insertOrUpdateKeyValue(keyEntry.Text, valueEntry.Text)
+		keyEntry.SetText("")
+		valueEntry.SetText("")
+		showKeyValesTabItem()
+	})
+	cancelButton := widget.NewButtonWithIcon("Cancel", theme.CancelIcon(), func() {
+		keyEntry.SetText("")
+		valueEntry.SetText("")
+		showKeyValesTabItem()
 	})
 
 	// 确保输入框尽可能大
-	content := container.NewBorder(
-		keyEntry,   // top
-		saveButton, // bottom
+	border := container.NewBorder(
+		keyEntry, // top
+		container.NewGridWithColumns(2, saveButton, cancelButton), // bottom
 		nil,        // left
 		nil,        // right
 		valueEntry, // center
 	)
+	border.Hide()
+	return border
+}
 
-	newKeyWindow.SetContent(content)
-	newKeyWindow.Resize(fyne.NewSize(windowWidth/2, windowHeight/2))
-	newKeyWindow.Show()
+func showNewConnectionTabItem() {
+	err := tabTitle.Set("New Connection")
+	if err != nil {
+		return
+	}
+	newConnectionTabItem.Show()
+	editConnectionTabItem.Hide()
+	newKeyValesTabItem.Hide()
+	keyValuesTabItem.Hide()
+}
+
+func showEditConnectionTabItem() {
+	err := tabTitle.Set("Edit Connection")
+	if err != nil {
+		return
+	}
+
+	connection := config.Config.Connections[editConnectionIndex]
+	editConnectionNameEntry.SetText(connection.Name)
+	editConnectionPathEntry.SetText(connection.DatabasePath)
+
+	newConnectionTabItem.Hide()
+	editConnectionTabItem.Show()
+	newKeyValesTabItem.Hide()
+	keyValuesTabItem.Hide()
+
+	// close the connections panel
+	toggleConnections()
+}
+
+func showKeyValesTabItem() {
+	newKeyValesTabItem.Hide()
+	editConnectionTabItem.Hide()
+	newConnectionTabItem.Hide()
+	keyValuesTabItem.Show()
+	err := tabTitle.Set("Key Values")
+	if err != nil {
+		return
+	}
+}
+
+func showNewKeyValesTabItem() {
+	err := tabTitle.Set("New Key-Value")
+	if err != nil {
+		return
+	}
+	newKeyValesTabItem.Show()
+	editConnectionTabItem.Hide()
+	newConnectionTabItem.Hide()
+	keyValuesTabItem.Hide()
 }
 
 func toggleConnections() {
-	if leftMainSplit.Offset == 0.15 {
+	if connectionPanelOpen {
 		leftMainSplit.Leading = container.NewVBox()
 		leftMainSplit.Offset = 0.0
+		connectionPanelOpen = false
 	} else {
 		leftMainSplit.Leading = connectionsPanel
 		leftMainSplit.Offset = 0.15
+		connectionPanelOpen = true
 	}
 	leftMainSplit.Refresh()
+	adaptiveColumnWidths()
 }
 
 func toggleValue() {
-	if mainValueSplit.Offset == 0.6 {
-		mainValueSplit.Trailing = container.NewVBox()
-		mainValueSplit.Offset = 1.0
+	if valuePanelOpen {
+		keyValuesTabItem.Trailing = container.NewVBox()
+		if keyValuesTabItem.Offset != 1.0 && valueSplitOffset != keyValuesTabItem.Offset {
+			valueSplitOffset = keyValuesTabItem.Offset
+		}
+		keyValuesTabItem.Offset = 1.0
 	} else {
-		mainValueSplit.Trailing = valuePanel
-		mainValueSplit.Offset = 0.6
+		keyValuesTabItem.Trailing = valuePanel
+		keyValuesTabItem.Offset = valueSplitOffset
 	}
-	mainValueSplit.Refresh()
+	keyValuesTabItem.Refresh()
 }
 
-func showLogPopup(a fyne.App, w fyne.Window, logLevel, message string) {
-	formattedMessage := "[" + logLevel + "] " + message
-	label := widget.NewLabel(formattedMessage)
-	content := container.NewVBox(label)
-	popup := widget.NewPopUp(content, w.Canvas())
+func showInfoLog(message string) {
+	localTimeStr := time.Now().Format("2006-01-02 15:04:05")
+	message = localTimeStr + "｜INFO｜" + message
+	err := logMessage.Set(message)
+	if err != nil {
+		return
+	}
 
-	// set popup at the top mid of the mainValueSplit
-	width := mainValueSplit.Size().Width + leftMainSplit.Leading.Size().Width
-
-	popup.Move(fyne.NewPos(width/2, 0))
-
-	popup.Show()
-
-	// 自动隐藏弹出窗口
 	go func() {
-		time.Sleep(3 * time.Second)
-		popup.Hide()
+		time.Sleep(5 * time.Second)
+
+		if oldMessage, _ := logMessage.Get(); oldMessage == message {
+			err := logMessage.Set("")
+			if err != nil {
+				return
+			}
+		}
 	}()
+}
+
+func showErrorLog(message string) {
+	localTimeStr := time.Now().Format("2006-01-02 15:04:05")
+	message = localTimeStr + "｜ERROR｜" + message
+	err := logMessage.Set(message)
+	if err != nil {
+		return
+	}
+
+	go func() {
+		time.Sleep(5 * time.Second)
+
+		if oldMessage, _ := logMessage.Get(); oldMessage == message {
+			err := logMessage.Set("")
+			if err != nil {
+				return
+			}
+		}
+	}()
+}
+
+func newLogLabel(data binding.String) *fyne.Container {
+	logText = canvas.NewText("", theme.ForegroundColor())
+	logText.TextSize = 14
+
+	// 绑定数据到文本内容
+	data.AddListener(binding.NewDataListener(func() {
+		value, _ := data.Get()
+
+		logText.Text = value + "  "
+		logText.Refresh()
+	}))
+	return container.NewVBox(logText)
+}
+
+func adaptiveColumnWidths() {
+	if len(keyValues) == 0 || len(keyValues) > 10000 {
+		return
+	}
+
+	// 预设列的最大宽度
+	maxKeyWidth := float32(300)
+	maxValueWidth := float32(300)
+
+	// 遍历所有的键值对，计算列的最大宽度
+	for _, keyValue := range keyValues {
+		keyWidth := fyne.MeasureText(keyValue.Key, theme.TextSize(), fyne.TextStyle{}).Width
+		if keyWidth > maxKeyWidth {
+			maxKeyWidth = keyWidth
+		}
+		valueWidth := fyne.MeasureText(keyValue.Value, theme.TextSize(), fyne.TextStyle{}).Width
+		if valueWidth > maxValueWidth {
+			maxValueWidth = valueWidth
+		}
+	}
+	maxKeyWidth += 10
+	maxValueWidth += 10
+
+	// 设置表格列的宽度
+	keyValueTable.SetColumnWidth(0, maxKeyWidth)
+
+	valueWidth := keyValuesTabItem.Size().Width - maxKeyWidth
+	if valueWidth < maxValueWidth {
+		valueWidth = maxValueWidth
+	}
+
+	keyValueTable.SetColumnWidth(1, valueWidth)
 }
