@@ -147,6 +147,10 @@ func main() {
 		// show mainValueSplit
 		keyValuesTabItem.Hidden = true
 		keyValueTable.UnselectAll()
+		err := env.Close()
+		if err != nil {
+			return
+		}
 	}
 
 	// 主下侧布局：Value 多功能区
@@ -561,6 +565,24 @@ func initEditConnectionTabItem(w fyne.Window) *fyne.Container {
 			showErrorLog("Error converting map size to int64: " + err.Error())
 			return
 		}
+
+		// try to open the database to check if it exists
+		envTest, err = lmdb.NewEnv()
+		if err != nil {
+			showErrorLog("Error creating LMDB environment: " + err.Error())
+			return
+		}
+		err = envTest.Open(editConnectionPathEntry.Text, 0, 0664)
+		if err != nil {
+			showErrorLog("Error opening LMDB database: " + err.Error())
+			return
+		}
+		err = envTest.Close()
+		if err != nil {
+			showErrorLog("Error closing LMDB environment: " + err.Error())
+			return
+		}
+
 		config.Config.Connections[editConnectionIndex].MapSize = mapSize
 		err = config.SaveConfig()
 		if err != nil {
