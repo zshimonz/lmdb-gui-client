@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"math"
+	"strconv"
 	"strings"
 	"time"
 
@@ -57,6 +58,7 @@ var keyValuesTabItem *container.Split
 
 var editConnectionNameEntry *widget.Entry
 var editConnectionPathEntry *widget.Entry
+var editConnectionMapSizeEntry *widget.Entry
 var editConnectionIndex int
 var toggleConnectionsButton *widget.Button
 
@@ -110,8 +112,7 @@ func main() {
 				if selectedConnectionIndex == i {
 					connectionList.UnselectAll()
 				}
-				showEditConnectionTabItem()
-				editConnectionIndex = i
+				showEditConnectionTabItem(i)
 				toggleConnectionsButton.Disable()
 			}
 			deleteButton := toolbar.Items[1].(*widget.ToolbarAction)
@@ -416,7 +417,7 @@ func connectToDB(connectionIndex int) {
 		return
 	}
 
-	err = env.SetMapSize(1 << 30 * 100)
+	err = env.SetMapSize(1 << 30 * connection.MapSize)
 	if err != nil {
 		showErrorLog("Error setting LMDB map size: " + err.Error())
 		return
@@ -506,8 +507,15 @@ func deleteKeyValue(key string) {
 }
 
 func initEditConnectionTabItem(w fyne.Window) *fyne.Container {
+	editConnectionNameLabel := widget.NewLabel("Connection Name:")
+	editConnectionNameLabel.TextStyle = fyne.TextStyle{Monospace: true}
 	editConnectionNameEntry = widget.NewEntry()
+	editConnectionPathLabel := widget.NewLabel("Database  Path :")
+	editConnectionPathLabel.TextStyle = fyne.TextStyle{Monospace: true}
 	editConnectionPathEntry = widget.NewEntry()
+	editConnectionMapSizeLabel := widget.NewLabel("Map  Size  (GB) :")
+	editConnectionMapSizeLabel.TextStyle = fyne.TextStyle{Monospace: true}
+	editConnectionMapSizeEntry = widget.NewEntry()
 
 	saveButton := widget.NewButtonWithIcon("Save", theme.DocumentSaveIcon(), func() {
 		if editConnectionNameEntry.Text == "" {
@@ -518,6 +526,16 @@ func initEditConnectionTabItem(w fyne.Window) *fyne.Container {
 			showErrorLog("Database path cannot be empty")
 			return
 		}
+		if editConnectionMapSizeEntry.Text == "" {
+			showErrorLog("Map size cannot be empty")
+			return
+		}
+		// check map size is a non negative integer
+		if !isPositiveInteger(editConnectionMapSizeEntry.Text) {
+			showErrorLog("Map size must be a non-negative integer")
+			return
+		}
+
 		// try to open the database to check if it exists
 		envTest, err := lmdb.NewEnv()
 		if err != nil {
@@ -537,6 +555,13 @@ func initEditConnectionTabItem(w fyne.Window) *fyne.Container {
 
 		config.Config.Connections[editConnectionIndex].Name = editConnectionNameEntry.Text
 		config.Config.Connections[editConnectionIndex].DatabasePath = editConnectionPathEntry.Text
+		// convert map size to int64
+		mapSize, err := strconv.ParseInt(editConnectionMapSizeEntry.Text, 10, 64)
+		if err != nil {
+			showErrorLog("Error converting map size to int64: " + err.Error())
+			return
+		}
+		config.Config.Connections[editConnectionIndex].MapSize = mapSize
 		err = config.SaveConfig()
 		if err != nil {
 			showErrorLog("Error saving config: " + err.Error())
@@ -581,8 +606,9 @@ func initEditConnectionTabItem(w fyne.Window) *fyne.Container {
 
 	// 确保输入框尽可能大
 	border := container.NewVBox(
-		editConnectionNameEntry,
-		container.NewBorder(nil, nil, nil, browseButton, editConnectionPathEntry),
+		container.NewBorder(nil, nil, editConnectionNameLabel, nil, editConnectionNameEntry),
+		container.NewBorder(nil, nil, editConnectionPathLabel, browseButton, editConnectionPathEntry),
+		container.NewBorder(nil, nil, editConnectionMapSizeLabel, nil, editConnectionMapSizeEntry),
 		container.NewGridWithColumns(2, saveButton, cancelButton),
 	)
 	border.Hide()
@@ -590,11 +616,19 @@ func initEditConnectionTabItem(w fyne.Window) *fyne.Container {
 }
 
 func initNewConnectionTabItem(w fyne.Window) *fyne.Container {
+	nameLabel := widget.NewLabel("Connection Name:")
+	nameLabel.TextStyle = fyne.TextStyle{Monospace: true}
 	nameEntry := widget.NewEntry()
 	nameEntry.SetPlaceHolder("Enter connection name")
+	entryLabel := widget.NewLabel("Database  Path :")
+	entryLabel.TextStyle = fyne.TextStyle{Monospace: true}
 	entry := widget.NewEntry()
 	entry.SetPlaceHolder("Enter database path or use the button to browse")
 	entry.Wrapping = fyne.TextWrapWord
+	mapSizeLabel := widget.NewLabel("Map  Size  (GB) :")
+	mapSizeLabel.TextStyle = fyne.TextStyle{Monospace: true}
+	mapSizeEntry := widget.NewEntry()
+	mapSizeEntry.SetText("1")
 
 	browseButton := widget.NewButtonWithIcon("Browse", theme.FolderNewIcon(), func() {
 		fd := dialog.NewFolderOpen(func(file fyne.ListableURI, err error) {
@@ -619,6 +653,15 @@ func initNewConnectionTabItem(w fyne.Window) *fyne.Container {
 			showErrorLog("Database path cannot be empty")
 			return
 		}
+		if mapSizeEntry.Text == "" {
+			showErrorLog("Map size cannot be empty")
+			return
+		}
+		// check map size is a non negative integer
+		if !isPositiveInteger(mapSizeEntry.Text) {
+			showErrorLog("Map size must be a non-negative integer")
+			return
+		}
 		// try to open the database to check if it exists
 		envTest, err := lmdb.NewEnv()
 		if err != nil {
@@ -636,9 +679,11 @@ func initNewConnectionTabItem(w fyne.Window) *fyne.Container {
 			return
 		}
 
+		mapSize, err := strconv.ParseInt(mapSizeEntry.Text, 10, 64)
 		config.Config.Connections = append(config.Config.Connections, config.ConnectionConfig{
 			Name:         nameEntry.Text,
 			DatabasePath: entry.Text,
+			MapSize:      mapSize,
 		})
 		err = config.SaveConfig()
 		if err != nil {
@@ -648,6 +693,7 @@ func initNewConnectionTabItem(w fyne.Window) *fyne.Container {
 
 		nameEntry.SetText("")
 		entry.SetText("")
+		mapSizeEntry.SetText("1")
 		err = tabTitle.Set("Key Values")
 		if err != nil {
 			return
@@ -658,6 +704,7 @@ func initNewConnectionTabItem(w fyne.Window) *fyne.Container {
 	cancelButton := widget.NewButtonWithIcon("Cancel", theme.CancelIcon(), func() {
 		nameEntry.SetText("")
 		entry.SetText("")
+		mapSizeEntry.SetText("1")
 		err := tabTitle.Set("Key Values")
 		if err != nil {
 			return
@@ -667,8 +714,9 @@ func initNewConnectionTabItem(w fyne.Window) *fyne.Container {
 
 	// 确保输入框尽可能大
 	border := container.NewVBox(
-		nameEntry,
-		container.NewBorder(nil, nil, nil, browseButton, entry),
+		container.NewBorder(nil, nil, nameLabel, nil, nameEntry),
+		container.NewBorder(nil, nil, entryLabel, browseButton, entry),
+		container.NewBorder(nil, nil, mapSizeLabel, nil, mapSizeEntry),
 		container.NewGridWithColumns(2, saveButton, cancelButton),
 	)
 	border.Hide()
@@ -717,15 +765,17 @@ func showNewConnectionTabItem() {
 	keyValuesTabItem.Hide()
 }
 
-func showEditConnectionTabItem() {
+func showEditConnectionTabItem(i int) {
 	err := tabTitle.Set("Edit Connection")
 	if err != nil {
 		return
 	}
+	editConnectionIndex = i
 
 	connection := config.Config.Connections[editConnectionIndex]
 	editConnectionNameEntry.SetText(connection.Name)
 	editConnectionPathEntry.SetText(connection.DatabasePath)
+	editConnectionMapSizeEntry.SetText(strconv.FormatInt(connection.MapSize, 10))
 
 	newConnectionTabItem.Hide()
 	editConnectionTabItem.Show()
@@ -872,4 +922,14 @@ func adaptiveColumnWidths() {
 	}
 
 	keyValueTable.SetColumnWidth(1, valueWidth)
+}
+
+func isPositiveInteger(s string) bool {
+	// 尝试将字符串转换为整数
+	n, err := strconv.Atoi(s)
+	if err != nil {
+		return false
+	}
+	// 检查整数是否为正数
+	return n > 0
 }

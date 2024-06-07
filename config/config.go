@@ -10,6 +10,7 @@ import (
 type ConnectionConfig struct {
 	Name         string `yaml:"name"`
 	DatabasePath string `yaml:"database_path"`
+	MapSize      int64  `yaml:"map_size"` // GB
 }
 
 type AppConfig struct {
