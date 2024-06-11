@@ -15,7 +15,8 @@ import (
 	"fyne.io/fyne/v2/dialog"
 	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
-	"github.com/bmatsuo/lmdb-go/lmdb"
+	"github.com/PowerDNS/lmdb-go/lmdb"
+	"github.com/PowerDNS/lmdb-go/lmdbscan"
 	"github.com/go-gl/glfw/v3.3/glfw"
 
 	"github.com/zshimonz/lmdb-gui-client/config"
@@ -149,6 +150,7 @@ func main() {
 		keyValueTable.UnselectAll()
 		err := env.Close()
 		if err != nil {
+			showErrorLog("Error closing LMDB environment: " + err.Error())
 			return
 		}
 	}
@@ -253,7 +255,6 @@ func main() {
 	keyPrefixEntry := widget.NewEntry()
 	keyPrefixEntry.SetPlaceHolder("Key prefix filter")
 	keyPrefixEntry.OnSubmitted = func(s string) {
-		connectToDB(selectedConnectionIndex)
 		loadKeyValues(s)
 	}
 
@@ -264,7 +265,6 @@ func main() {
 	keyPrefixLabels := container.NewHBox(keyPrefixIcon, keyPrefixLabel)
 
 	refreshKeysButton := widget.NewButtonWithIcon("Refresh", theme.ViewRefreshIcon(), func() {
-		connectToDB(selectedConnectionIndex)
 		loadKeyValues(keyPrefixEntry.Text)
 		showInfoLog("Keys refreshed!")
 		keyValueTable.UnselectAll()
@@ -293,7 +293,6 @@ func main() {
 			time.Sleep(5 * time.Second)
 			if connectionList.Length() != 0 && selectedConnectionIndex != -1 && autoRefreshCheckbox.Checked {
 				// reconnect to db
-				connectToDB(selectedConnectionIndex)
 				loadKeyValues(keyPrefixEntry.Text)
 				keyValueTable.UnselectAll()
 
@@ -452,26 +451,35 @@ func connectToDB(connectionIndex int) {
 
 func loadKeyValues(keyPrefix string) {
 	err := env.View(func(txn *lmdb.Txn) error {
-		cur, err := txn.OpenCursor(dbi)
-		if err != nil {
-			return err
-		}
-		defer cur.Close()
+		scanner := lmdbscan.New(txn, dbi)
 
-		keyValues = nil
-		for {
-			key, val, err := cur.Get(nil, nil, lmdb.Next)
-			if err != nil {
-				break
-			}
-			if keyPrefix == "" || len(key) >= len(keyPrefix) && string(key[:len(keyPrefix)]) == keyPrefix {
+		// 设置扫描器的起始位置
+		if keyPrefix != "" {
+			scanner.Set([]byte(keyPrefix), nil, lmdb.SetRange)
+		}
+
+		keyValues = make([]KeyValue, 0)
+		for scanner.Scan() {
+			key := scanner.Key()
+			val := scanner.Val()
+
+			// 检查键前缀
+			if keyPrefix == "" || (len(key) >= len(keyPrefix) && string(key[:len(keyPrefix)]) == keyPrefix) {
 				displayVal := string(val)
 				if len(displayVal) > 30 {
 					displayVal = displayVal[:30] + "..."
 				}
 				keyValues = append(keyValues, KeyValue{Key: string(key), Value: strings.ReplaceAll(displayVal, "\n", " ")})
+			} else if keyPrefix != "" && string(key) > keyPrefix {
+				// 如果当前键大于前缀，结束扫描
+				break
 			}
 		}
+
+		if err := scanner.Err(); err != nil {
+			return err
+		}
+
 		keyValueTable.Refresh()
 		adaptiveColumnWidths()
 

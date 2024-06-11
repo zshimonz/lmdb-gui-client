@@ -4,7 +4,7 @@ go 1.21
 
 require (
 	fyne.io/fyne/v2 v2.4.5
-	github.com/bmatsuo/lmdb-go v1.8.0
+	github.com/PowerDNS/lmdb-go v1.9.2
 	github.com/go-gl/glfw/v3.3/glfw v0.0.0-20240306074159-ea2d69986ecb
 	gopkg.in/yaml.v2 v2.4.0
 )
