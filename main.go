@@ -654,7 +654,6 @@ func initNewConnectionTabItem(w fyne.Window) *fyne.Container {
 	entryLabel.TextStyle = fyne.TextStyle{Monospace: true}
 	entry := widget.NewEntry()
 	entry.SetPlaceHolder("Enter database path or use the button to browse")
-	entry.Wrapping = fyne.TextWrapWord
 	mapSizeLabel := widget.NewLabel("Map  Size  (GB) :")
 	mapSizeLabel.TextStyle = fyne.TextStyle{Monospace: true}
 	mapSizeEntry := widget.NewEntry()
