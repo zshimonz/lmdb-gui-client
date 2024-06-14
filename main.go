@@ -255,7 +255,7 @@ func main() {
 	keyPrefixEntry := widget.NewEntry()
 	keyPrefixEntry.SetPlaceHolder("Key prefix filter")
 	keyPrefixEntry.OnSubmitted = func(s string) {
-		loadKeyValues(s)
+		loadKeyValues(s, true)
 	}
 
 	keyPrefixLabel := widget.NewLabel("Key Prefix:")
@@ -265,7 +265,7 @@ func main() {
 	keyPrefixLabels := container.NewHBox(keyPrefixIcon, keyPrefixLabel)
 
 	refreshKeysButton := widget.NewButtonWithIcon("Refresh", theme.ViewRefreshIcon(), func() {
-		loadKeyValues(keyPrefixEntry.Text)
+		loadKeyValues(keyPrefixEntry.Text, true)
 		showInfoLog("Keys refreshed!")
 		keyValueTable.UnselectAll()
 	})
@@ -293,7 +293,7 @@ func main() {
 			time.Sleep(5 * time.Second)
 			if connectionList.Length() != 0 && selectedConnectionIndex != -1 && autoRefreshCheckbox.Checked {
 				// reconnect to db
-				loadKeyValues(keyPrefixEntry.Text)
+				loadKeyValues(keyPrefixEntry.Text, true)
 				keyValueTable.UnselectAll()
 
 				showInfoLog("Auto Refresh success!")
@@ -446,10 +446,13 @@ func connectToDB(connectionIndex int) {
 	}
 	showInfoLog("Database connected")
 
-	loadKeyValues("")
+	loadKeyValues("", false)
 }
 
-func loadKeyValues(keyPrefix string) {
+func loadKeyValues(keyPrefix string, reconnectDB bool) {
+	if reconnectDB {
+		connectToDB(selectedConnectionIndex)
+	}
 	err := env.View(func(txn *lmdb.Txn) error {
 		scanner := lmdbscan.New(txn, dbi)
 
@@ -501,7 +504,7 @@ func insertOrUpdateKeyValue(key, value string) {
 	}
 	showInfoLog("Key-Value inserted/updated")
 
-	loadKeyValues("")
+	loadKeyValues("", false)
 }
 
 func deleteKeyValue(key string) {
@@ -515,7 +518,7 @@ func deleteKeyValue(key string) {
 	}
 	showInfoLog("Key-Value deleted")
 
-	loadKeyValues("")
+	loadKeyValues("", false)
 }
 
 func initEditConnectionTabItem(w fyne.Window) *fyne.Container {
