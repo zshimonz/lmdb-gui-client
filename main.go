@@ -469,9 +469,9 @@ func loadKeyValues(keyPrefix string, reconnectDB bool) {
 			// 检查键前缀
 			if keyPrefix == "" || (len(key) >= len(keyPrefix) && string(key[:len(keyPrefix)]) == keyPrefix) {
 				displayVal := string(val)
-				if len(displayVal) > 30 {
-					displayVal = displayVal[:30] + "..."
-				}
+				//if len(displayVal) > 50 {
+				//	displayVal = displayVal[:50] + "..."
+				//}
 				keyValues = append(keyValues, KeyValue{Key: string(key), Value: strings.ReplaceAll(displayVal, "\n", " ")})
 			} else if keyPrefix != "" && string(key) > keyPrefix {
 				// 如果当前键大于前缀，结束扫描
@@ -937,23 +937,47 @@ func adaptiveColumnWidths() {
 		if keyWidth > maxKeyWidth {
 			maxKeyWidth = keyWidth
 		}
-		valueWidth := fyne.MeasureText(keyValue.Value, theme.TextSize(), fyne.TextStyle{}).Width
-		if valueWidth > maxValueWidth {
-			maxValueWidth = valueWidth
-		}
 	}
+
+	// 增加一些额外的空间
 	maxKeyWidth += 10
-	maxValueWidth += 10
 
 	// 设置表格列的宽度
 	keyValueTable.SetColumnWidth(0, maxKeyWidth)
 
-	valueWidth := keyValuesTabItem.Size().Width - maxKeyWidth
-	if valueWidth < maxValueWidth {
-		valueWidth = maxValueWidth
+	// 计算剩余的宽度并更新值为前缀那么多字
+	remainingWidth := keyValuesTabItem.Size().Width - maxKeyWidth
+	minValueWidth := fyne.MeasureText("W", theme.TextSize(), fyne.TextStyle{}).Width * 30 // 计算30个字符的宽度
+
+	if remainingWidth < minValueWidth {
+		remainingWidth = minValueWidth
 	}
 
-	keyValueTable.SetColumnWidth(1, valueWidth)
+	for i, keyValue := range keyValues {
+		value := keyValue.Value
+		prefixValue := truncateToFit(value, remainingWidth)
+		keyValues[i].Value = prefixValue
+	}
+
+	// 更新值列的宽度
+	maxValueWidth = remainingWidth
+	keyValueTable.SetColumnWidth(1, maxValueWidth)
+}
+
+// truncateToFit truncates the given string to fit within the specified width
+func truncateToFit(value string, width float32) string {
+	var truncatedValue string
+	space := fyne.MeasureText(" ", theme.TextSize(), fyne.TextStyle{}).Width
+	for i := 1; i <= len(value); i++ {
+		partialValue := value[:i]
+		partialWidth := fyne.MeasureText(partialValue, theme.TextSize(), fyne.TextStyle{}).Width
+		if partialWidth+space > width {
+			truncatedValue = value[:i-1]
+			break
+		}
+		truncatedValue = partialValue
+	}
+	return truncatedValue
 }
 
 func isPositiveInteger(s string) bool {
