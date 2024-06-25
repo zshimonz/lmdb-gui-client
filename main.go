@@ -101,7 +101,7 @@ func main() {
 				widget.NewToolbarAction(theme.ContentClearIcon(), func() { connectionList.UnselectAll() }),
 			)
 
-			return container.NewGridWithColumns(2, label, toolbar)
+			return container.NewBorder(nil, nil, label, toolbar)
 		},
 		func(i widget.ListItemID, o fyne.CanvasObject) {
 			label := o.(*fyne.Container).Objects[0].(*widget.Label)
