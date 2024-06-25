@@ -923,7 +923,7 @@ func newLogLabel(data binding.String) *fyne.Container {
 }
 
 func adaptiveColumnWidths() {
-	if len(keyValues) == 0 || len(keyValues) > 10000 {
+	if len(keyValues) == 0 || len(keyValues) > 300 {
 		return
 	}
 
