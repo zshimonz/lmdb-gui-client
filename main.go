@@ -278,8 +278,12 @@ func main() {
 
 	// clear key prefix filter button
 	clearKeyPrefixButton := widget.NewButtonWithIcon("Clear", theme.CancelIcon(), func() {
-		keyPrefixEntry.SetText("")
+		err := keyPrefix.Set("")
+		if err != nil {
+			return
+		}
 		loadKeyValues("", true)
+		keyValueTable.UnselectAll()
 	})
 
 	keyPrefixLabel := widget.NewLabel("Key Prefix:")
