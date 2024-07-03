@@ -63,6 +63,9 @@ var editConnectionMapSizeEntry *widget.Entry
 var editConnectionIndex int
 var toggleConnectionsButton *widget.Button
 
+var keyPrefix = binding.NewString()
+var hideKeyPrefix = binding.NewBool()
+
 type KeyValue struct {
 	Key   string
 	Value string
@@ -218,7 +221,18 @@ func main() {
 		if id.Row < 0 || id.Row >= len(keyValues) || id.Col < 0 {
 			return
 		}
+		isHide, err := hideKeyPrefix.Get()
+		if err != nil {
+			return
+		}
 		selectedKey = keyValues[id.Row].Key
+		if isHide {
+			prefix, err := keyPrefix.Get()
+			if err != nil {
+				return
+			}
+			selectedKey = prefix + selectedKey
+		}
 		if err := valueLabelString.Set("Key: " + selectedKey); err != nil {
 			return
 		}
@@ -256,7 +270,7 @@ func main() {
 	// update column header
 	keyValueTable.ShowHeaderColumn = false
 
-	keyPrefixEntry := widget.NewEntry()
+	keyPrefixEntry := widget.NewEntryWithData(keyPrefix)
 	keyPrefixEntry.SetPlaceHolder("Key prefix filter")
 	keyPrefixEntry.OnSubmitted = func(s string) {
 		loadKeyValues(s, true)
@@ -296,6 +310,22 @@ func main() {
 	tabTitleLabel.TextStyle = fyne.TextStyle{Bold: true}
 	tabTitleLabel.Alignment = fyne.TextAlignCenter
 
+	err = hideKeyPrefix.Set(true)
+	if err != nil {
+		return
+	}
+
+	hideKeyPrefixCheckbox := widget.NewCheckWithData("Hide Key Prefix", hideKeyPrefix)
+	hideKeyPrefixCheckbox.OnChanged = func(b bool) {
+		err := hideKeyPrefix.Set(b)
+		if err != nil {
+			return
+		}
+		if selectedConnectionIndex != -1 {
+			loadKeyValues(keyPrefixEntry.Text, false)
+		}
+	}
+
 	autoRefreshCheckbox := widget.NewCheck("Auto Refresh (5s)", nil)
 	autoRefreshCheckbox.Checked = false
 	go func() {
@@ -311,7 +341,8 @@ func main() {
 		}
 	}()
 
-	refreshUnselectNewGrid := container.NewGridWithColumns(4, newKeyButton, unselectKeysButton, refreshKeysButton, container.NewCenter(autoRefreshCheckbox))
+	refreshUnselectNewGrid := container.NewGridWithColumns(5, newKeyButton, unselectKeysButton, refreshKeysButton,
+		container.NewCenter(hideKeyPrefixCheckbox), container.NewCenter(autoRefreshCheckbox))
 
 	// 添加标题栏左侧的两个按钮
 	toggleConnectionsButton = widget.NewButtonWithIcon("Connections", theme.MenuIcon(), toggleConnections)
@@ -482,7 +513,16 @@ func loadKeyValues(keyPrefix string, reconnectDB bool) {
 				//if len(displayVal) > 50 {
 				//	displayVal = displayVal[:50] + "..."
 				//}
-				keyValues = append(keyValues, KeyValue{Key: string(key), Value: strings.ReplaceAll(displayVal, "\n", " ")})
+
+				displayKey := string(key)
+				hidePrefix, err := hideKeyPrefix.Get()
+				if err != nil {
+					return err
+				}
+				if hidePrefix {
+					displayKey = displayKey[len(keyPrefix):]
+				}
+				keyValues = append(keyValues, KeyValue{Key: displayKey, Value: strings.ReplaceAll(displayVal, "\n", " ")})
 			} else if keyPrefix != "" && string(key) > keyPrefix {
 				// 如果当前键大于前缀，结束扫描
 				break
@@ -513,8 +553,11 @@ func insertOrUpdateKeyValue(key, value string) {
 		return
 	}
 	showInfoLog("Key-Value inserted/updated")
-
-	loadKeyValues("", false)
+	prefix, err := keyPrefix.Get()
+	if err != nil {
+		return
+	}
+	loadKeyValues(prefix, false)
 }
 
 func deleteKeyValue(key string) {
@@ -528,7 +571,12 @@ func deleteKeyValue(key string) {
 	}
 	showInfoLog("Key-Value deleted")
 
-	loadKeyValues("", false)
+	prefix, err := keyPrefix.Get()
+	if err != nil {
+		return
+	}
+
+	loadKeyValues(prefix, false)
 }
 
 func initEditConnectionTabItem(w fyne.Window) *fyne.Container {
