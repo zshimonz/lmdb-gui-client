@@ -188,7 +188,11 @@ func main() {
 	})
 
 	valueControls := container.NewGridWithColumns(3, updateButton, deleteButton, cancelButton)
-	valuePanel = container.NewBorder(container.NewBorder(nil, nil, valueLabel, hideButton, nil), valueControls, nil, nil, valueView)
+	copyLabelButton := widget.NewButtonWithIcon("Copy Key", theme.ContentCopyIcon(), func() {
+		fyne.CurrentApp().Driver().AllWindows()[0].Clipboard().SetContent(valueLabel.Text[5:])
+		showInfoLog("Key copied to clipboard!")
+	})
+	valuePanel = container.NewBorder(container.NewBorder(nil, nil, container.NewHBox(valueLabel, copyLabelButton), hideButton, nil), valueControls, nil, nil, valueView)
 	valuePanel.Hidden = true
 
 	keyValueTable = widget.NewTableWithHeaders(
@@ -215,7 +219,7 @@ func main() {
 			return
 		}
 		selectedKey = keyValues[id.Row].Key
-		if err := valueLabelString.Set("Value for: " + selectedKey); err != nil {
+		if err := valueLabelString.Set("Key: " + selectedKey); err != nil {
 			return
 		}
 		refreshValueView(valueView)
@@ -229,7 +233,7 @@ func main() {
 
 	keyValueTable.OnUnselected = func(id widget.TableCellID) {
 		selectedKey = ""
-		err := valueLabelString.Set("Value for: " + selectedKey)
+		err := valueLabelString.Set("Key: " + selectedKey)
 		if err != nil {
 			return
 		}
@@ -257,6 +261,12 @@ func main() {
 	keyPrefixEntry.OnSubmitted = func(s string) {
 		loadKeyValues(s, true)
 	}
+
+	// clear key prefix filter button
+	clearKeyPrefixButton := widget.NewButtonWithIcon("Clear", theme.CancelIcon(), func() {
+		keyPrefixEntry.SetText("")
+		loadKeyValues("", true)
+	})
 
 	keyPrefixLabel := widget.NewLabel("Key Prefix:")
 	keyPrefixLabel.Alignment = fyne.TextAlignLeading
@@ -316,7 +326,7 @@ func main() {
 		logText.Color = theme.ForegroundColor()
 	})
 
-	keyPrefixes := container.NewBorder(nil, nil, keyPrefixLabels, nil, keyPrefixEntry)
+	keyPrefixes := container.NewBorder(nil, nil, keyPrefixLabels, clearKeyPrefixButton, keyPrefixEntry)
 	keyValuesControls := container.NewBorder(nil, refreshUnselectNewGrid, nil, nil, keyPrefixes)
 	keyValuesList := container.NewBorder(keyValuesControls, nil, nil, nil, keyValueTable)
 
