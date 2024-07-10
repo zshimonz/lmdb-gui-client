@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"math"
 	"strconv"
 	"strings"
@@ -65,6 +66,14 @@ var toggleConnectionsButton *widget.Button
 
 var keyPrefix = binding.NewString()
 var hideKeyPrefix = binding.NewBool()
+
+var currentPage = 1
+var pageSize = 20
+var totalPage = 1
+var pageLabel *widget.Label
+var totalRecords int
+var totalRecordsCached bool
+var recordCountLabel *widget.Label
 
 type KeyValue struct {
 	Key   string
@@ -141,7 +150,7 @@ func main() {
 
 	connectionList.OnSelected = func(id widget.ListItemID) {
 		selectedConnectionIndex = id
-		connectToDB(selectedConnectionIndex)
+		connectToDB(selectedConnectionIndex, true)
 		// hide mainValueSplit
 		keyValuesTabItem.Hidden = false
 	}
@@ -273,6 +282,8 @@ func main() {
 	keyPrefixEntry := widget.NewEntryWithData(keyPrefix)
 	keyPrefixEntry.SetPlaceHolder("Key prefix filter")
 	keyPrefixEntry.OnSubmitted = func(s string) {
+		currentPage = 1
+		totalRecordsCached = false
 		loadKeyValues(s, true)
 	}
 
@@ -282,6 +293,8 @@ func main() {
 		if err != nil {
 			return
 		}
+		currentPage = 1
+		totalRecordsCached = false
 		loadKeyValues("", true)
 		keyValueTable.UnselectAll()
 	})
@@ -293,6 +306,8 @@ func main() {
 	keyPrefixLabels := container.NewHBox(keyPrefixIcon, keyPrefixLabel)
 
 	refreshKeysButton := widget.NewButtonWithIcon("Refresh", theme.ViewRefreshIcon(), func() {
+		currentPage = 1
+		totalRecordsCached = false
 		loadKeyValues(keyPrefixEntry.Text, true)
 		showInfoLog("Keys refreshed!")
 		keyValueTable.UnselectAll()
@@ -337,6 +352,9 @@ func main() {
 			time.Sleep(5 * time.Second)
 			if connectionList.Length() != 0 && selectedConnectionIndex != -1 && autoRefreshCheckbox.Checked {
 				// reconnect to db
+				currentPage = 1
+				totalRecordsCached = false
+
 				loadKeyValues(keyPrefixEntry.Text, true)
 				keyValueTable.UnselectAll()
 
@@ -361,9 +379,42 @@ func main() {
 		logText.Color = theme.ForegroundColor()
 	})
 
+	// 初始化分页控件
+	pageLabel = widget.NewLabel("Page 1 / 1")
+	recordCountLabel = widget.NewLabel("Records: 0")
+	recordCountLabel.Alignment = fyne.TextAlignCenter
+
+	pageLabel.Alignment = fyne.TextAlignCenter
+	firstButton := widget.NewButton("First", func() {
+		if currentPage > 1 {
+			currentPage = 1
+			loadKeyValues(keyPrefixEntry.Text, false)
+		}
+	})
+	lastButton := widget.NewButton("Last", func() {
+		if currentPage < totalPage {
+			currentPage = totalPage
+			loadKeyValues(keyPrefixEntry.Text, false)
+		}
+	})
+
+	prevButton := widget.NewButton("Prev", func() {
+		if currentPage > 1 {
+			currentPage--
+			loadKeyValues(keyPrefixEntry.Text, false)
+		}
+	})
+	nextButton := widget.NewButton("Next", func() {
+		if currentPage < totalPage {
+			currentPage++
+			loadKeyValues(keyPrefixEntry.Text, false)
+		}
+	})
+	paginationControls := container.NewGridWithColumns(6, firstButton, prevButton, pageLabel, recordCountLabel, nextButton, lastButton)
+
 	keyPrefixes := container.NewBorder(nil, nil, keyPrefixLabels, clearKeyPrefixButton, keyPrefixEntry)
 	keyValuesControls := container.NewBorder(nil, refreshUnselectNewGrid, nil, nil, keyPrefixes)
-	keyValuesList := container.NewBorder(keyValuesControls, nil, nil, nil, keyValueTable)
+	keyValuesList := container.NewBorder(keyValuesControls, paginationControls, nil, nil, keyValueTable)
 
 	connectConnectionButton := widget.NewButtonWithIcon("New Connection", theme.ContentAddIcon(), func() {
 		showNewConnectionTabItem()
@@ -451,7 +502,7 @@ func deleteConnection(connectionIndex int, connectionList *widget.List) {
 	connectionList.Refresh()
 }
 
-func connectToDB(connectionIndex int) {
+func connectToDB(connectionIndex int, load bool) {
 	if len(config.Config.Connections) == 0 {
 		showErrorLog("No database path configured")
 		return
@@ -491,12 +542,16 @@ func connectToDB(connectionIndex int) {
 	}
 	showInfoLog("Database connected")
 
-	loadKeyValues("", false)
+	currentPage = 1
+	totalRecordsCached = false
+	if load {
+		loadKeyValues("", false)
+	}
 }
 
 func loadKeyValues(keyPrefix string, reconnectDB bool) {
 	if reconnectDB {
-		connectToDB(selectedConnectionIndex)
+		connectToDB(selectedConnectionIndex, false)
 	}
 	err := env.View(func(txn *lmdb.Txn) error {
 		scanner := lmdbscan.New(txn, dbi)
@@ -505,9 +560,46 @@ func loadKeyValues(keyPrefix string, reconnectDB bool) {
 		if keyPrefix != "" {
 			scanner.Set([]byte(keyPrefix), nil, lmdb.SetRange)
 		}
+		// 计算总记录数（仅在首次计算时）
+		if !totalRecordsCached {
+			totalRecords = 0
+			for scanner.Scan() {
+				key := scanner.Key()
+				if keyPrefix != "" && !strings.HasPrefix(string(key), keyPrefix) {
+					break
+				}
+				totalRecords++
+			}
+			totalRecordsCached = true
 
+			recordCountLabel.SetText("Records: " + strconv.Itoa(totalRecords))
+
+			// 清空扫描器，并重新设置起始位置
+			scanner.Close()
+			scanner = lmdbscan.New(txn, dbi)
+			if keyPrefix != "" {
+				scanner.Set([]byte(keyPrefix), nil, lmdb.SetRange)
+			}
+		}
+
+		totalPage = int(math.Ceil(float64(totalRecords) / float64(pageSize)))
+
+		pageLabel.SetText(fmt.Sprintf("Page %d / %d", currentPage, totalPage))
+
+		// 跳过前面页的数据
+		for i := 0; i < (currentPage-1)*pageSize; i++ {
+			if !scanner.Scan() {
+				break
+			}
+		}
+
+		// 读取当前页的数据
 		keyValues = make([]KeyValue, 0)
-		for scanner.Scan() {
+		for i := 0; i < pageSize; i++ {
+			if !scanner.Scan() {
+				break
+			}
+
 			key := scanner.Key()
 			val := scanner.Val()
 
