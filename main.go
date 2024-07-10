@@ -74,6 +74,8 @@ var pageLabel *widget.Label
 var totalRecords int
 var totalRecordsCached bool
 var recordCountLabel *widget.Label
+var pageSizeList *widget.Select
+var pageEntry *widget.Entry
 
 type KeyValue struct {
 	Key   string
@@ -150,6 +152,9 @@ func main() {
 
 	connectionList.OnSelected = func(id widget.ListItemID) {
 		selectedConnectionIndex = id
+		if err := keyPrefix.Set(""); err != nil {
+			return
+		}
 		connectToDB(selectedConnectionIndex, true)
 		// hide mainValueSplit
 		keyValuesTabItem.Hidden = false
@@ -363,6 +368,20 @@ func main() {
 		}
 	}()
 
+	// pageSize drawdownlist
+	pageSizeList = widget.NewSelect([]string{"10", "20", "30", "50", "100"}, func(s string) {
+		pageSize, err = strconv.Atoi(s)
+		if err != nil {
+			return
+		}
+		currentPage = 1
+		totalRecordsCached = false
+		loadKeyValues(keyPrefixEntry.Text, true)
+	})
+	pageSizeList.PlaceHolder = "Page Size"
+	pageSizeList.Selected = "20"
+	pageSizeList.Alignment = fyne.TextAlignCenter
+
 	refreshUnselectNewGrid := container.NewGridWithColumns(5, newKeyButton, unselectKeysButton, refreshKeysButton,
 		container.NewCenter(hideKeyPrefixCheckbox), container.NewCenter(autoRefreshCheckbox))
 
@@ -410,9 +429,28 @@ func main() {
 			loadKeyValues(keyPrefixEntry.Text, false)
 		}
 	})
-	paginationControls := container.NewGridWithColumns(6, firstButton, prevButton, pageLabel, recordCountLabel, nextButton, lastButton)
 
-	keyPrefixes := container.NewBorder(nil, nil, keyPrefixLabels, clearKeyPrefixButton, keyPrefixEntry)
+	pageEntry = widget.NewEntry()
+	pageEntry.SetPlaceHolder("PageNum")
+
+	goToPageButton := widget.NewButton("Go", func() {
+		page, err := strconv.Atoi(pageEntry.Text)
+		if err == nil && page > 0 && page <= totalPage {
+			currentPage = page
+			loadKeyValues(keyPrefixEntry.Text, false)
+		} else {
+			showErrorLog("Invalid page number")
+		}
+	})
+
+	pageEntry.OnSubmitted = func(s string) {
+		goToPageButton.OnTapped()
+	}
+	pageEntry.Resize(fyne.NewSize(100, 36))
+
+	paginationControls := container.NewGridWithColumns(7, firstButton, prevButton, pageLabel, recordCountLabel, nextButton, lastButton, container.NewGridWithColumns(2, pageEntry, goToPageButton))
+
+	keyPrefixes := container.NewBorder(nil, nil, keyPrefixLabels, container.NewHBox(clearKeyPrefixButton, container.NewBorder(nil, nil, widget.NewLabel("Page Size:"), nil, pageSizeList)), keyPrefixEntry)
 	keyValuesControls := container.NewBorder(nil, refreshUnselectNewGrid, nil, nil, keyPrefixes)
 	keyValuesList := container.NewBorder(keyValuesControls, paginationControls, nil, nil, keyValueTable)
 
