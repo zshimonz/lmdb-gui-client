@@ -151,13 +151,17 @@ func main() {
 	)
 
 	connectionList.OnSelected = func(id widget.ListItemID) {
-		selectedConnectionIndex = id
 		if err := keyPrefix.Set(""); err != nil {
 			return
 		}
-		connectToDB(selectedConnectionIndex, true)
-		// hide mainValueSplit
-		keyValuesTabItem.Hidden = false
+		err = connectToDB(id, true)
+		if err == nil {
+			selectedConnectionIndex = id
+			// hide mainValueSplit
+			keyValuesTabItem.Hidden = false
+		} else {
+			connectionList.UnselectAll()
+		}
 	}
 
 	connectionList.OnUnselected = func(id widget.ListItemID) {
@@ -540,10 +544,10 @@ func deleteConnection(connectionIndex int, connectionList *widget.List) {
 	connectionList.Refresh()
 }
 
-func connectToDB(connectionIndex int, load bool) {
+func connectToDB(connectionIndex int, load bool) error {
 	if len(config.Config.Connections) == 0 {
 		showErrorLog("No database path configured")
-		return
+		return nil
 	}
 	connection := config.Config.Connections[connectionIndex]
 
@@ -551,24 +555,24 @@ func connectToDB(connectionIndex int, load bool) {
 	env, err = lmdb.NewEnv()
 	if err != nil {
 		showErrorLog("Error creating LMDB environment: " + err.Error())
-		return
+		return err
 	}
 
 	err = env.SetMapSize(1 << 30 * connection.MapSize)
 	if err != nil {
 		showErrorLog("Error setting LMDB map size: " + err.Error())
-		return
+		return err
 	}
 
 	err = env.SetMaxDBs(0)
 	if err != nil {
 		showErrorLog("Error setting LMDB max DBs: " + err.Error())
-		return
+		return err
 	}
 	err = env.Open(connection.DatabasePath, 0, 0664)
 	if err != nil {
 		showErrorLog("Error opening LMDB database: " + err.Error())
-		return
+		return err
 	}
 	err = env.Update(func(txn *lmdb.Txn) (err error) {
 		dbi, err = txn.OpenRoot(0)
@@ -576,7 +580,7 @@ func connectToDB(connectionIndex int, load bool) {
 	})
 	if err != nil {
 		showErrorLog("Error opening LMDB root: " + err.Error())
-		return
+		return err
 	}
 	showInfoLog("Database connected")
 
@@ -585,6 +589,7 @@ func connectToDB(connectionIndex int, load bool) {
 	if load {
 		loadKeyValues("", false)
 	}
+	return nil
 }
 
 func loadKeyValues(keyPrefix string, reconnectDB bool) {
