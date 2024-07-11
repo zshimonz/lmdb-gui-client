@@ -80,6 +80,8 @@ var pageEntry *widget.Entry
 
 var oneCharWidth float32
 
+var hideValues = binding.NewBool()
+
 type KeyValue struct {
 	Key   string
 	Value string
@@ -377,7 +379,16 @@ func main() {
 		}
 	}()
 
-	// pageSize drawdownlist
+	hideValuesCheckbox := widget.NewCheckWithData("Hide Values", hideValues)
+	hideValuesCheckbox.OnChanged = func(b bool) {
+		err := hideValues.Set(b)
+		if err != nil {
+			return
+		}
+		loadKeyValues(keyPrefixEntry.Text, false)
+	}
+
+	// pageSize Drop-down menu
 	pageSizeList = widget.NewSelect([]string{"10", "20", "30", "50", "100"}, func(s string) {
 		pageSize, err = strconv.Atoi(s)
 		if err != nil {
@@ -391,8 +402,8 @@ func main() {
 	pageSizeList.Selected = "20"
 	pageSizeList.Alignment = fyne.TextAlignCenter
 
-	refreshUnselectNewGrid := container.NewGridWithColumns(5, newKeyButton, unselectKeysButton, refreshKeysButton,
-		container.NewCenter(hideKeyPrefixCheckbox), container.NewCenter(autoRefreshCheckbox))
+	refreshUnselectNewGrid := container.NewGridWithColumns(6, newKeyButton, unselectKeysButton, refreshKeysButton,
+		container.NewCenter(hideKeyPrefixCheckbox), container.NewCenter(autoRefreshCheckbox), container.NewCenter(hideValuesCheckbox))
 
 	// 添加标题栏左侧的两个按钮
 	toggleConnectionsButton = widget.NewButtonWithIcon("Connections", theme.MenuIcon(), toggleConnections)
@@ -652,11 +663,15 @@ func loadKeyValues(keyPrefix string, reconnectDB bool) {
 			val := scanner.Val()
 
 			// 检查键前缀
-			maxLen := 190
+			maxLen := 195
 			if keyPrefix == "" || (len(key) >= len(keyPrefix) && string(key[:len(keyPrefix)]) == keyPrefix) {
-				displayVal := string(val)
-				if len(displayVal) > maxLen {
-					displayVal = displayVal[:maxLen]
+				displayVal := ""
+				isHide, _ := hideValues.Get()
+				if !isHide {
+					displayVal = string(val)
+					if len(displayVal) > maxLen {
+						displayVal = displayVal[:maxLen]
+					}
 				}
 
 				displayKey := string(key)
@@ -1126,6 +1141,13 @@ func newLogLabel(data binding.String) *fyne.Container {
 }
 
 func adaptiveColumnWidths() {
+	isHide, _ := hideValues.Get()
+	if isHide {
+		keyValueTable.SetColumnWidth(0, keyValuesTabItem.Size().Width)
+		// 隐藏值列
+		keyValueTable.SetColumnWidth(1, 0)
+		return
+	}
 	go func() {
 		// 预设列的最大宽度
 		maxKeyWidth := float32(300)
