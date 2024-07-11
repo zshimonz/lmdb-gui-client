@@ -6,6 +6,7 @@ import (
 	"math"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"fyne.io/fyne/v2"
@@ -77,6 +78,8 @@ var recordCountLabel *widget.Label
 var pageSizeList *widget.Select
 var pageEntry *widget.Entry
 
+var oneCharWidth float32
+
 type KeyValue struct {
 	Key   string
 	Value string
@@ -91,6 +94,8 @@ func main() {
 	a.Settings().SetTheme(darkTheme)
 
 	w := a.NewWindow("LMDB GUI Client")
+
+	oneCharWidth = fyne.MeasureText("W", theme.TextSize(), fyne.TextStyle{}).Width
 
 	// set window icon
 	iconResource, err := fyne.LoadResourceFromPath("icon.png")
@@ -594,7 +599,7 @@ func connectToDB(connectionIndex int, load bool) error {
 
 func loadKeyValues(keyPrefix string, reconnectDB bool) {
 	if reconnectDB {
-		connectToDB(selectedConnectionIndex, false)
+		_ = connectToDB(selectedConnectionIndex, false)
 	}
 	err := env.View(func(txn *lmdb.Txn) error {
 		scanner := lmdbscan.New(txn, dbi)
@@ -647,11 +652,12 @@ func loadKeyValues(keyPrefix string, reconnectDB bool) {
 			val := scanner.Val()
 
 			// 检查键前缀
+			maxLen := 190
 			if keyPrefix == "" || (len(key) >= len(keyPrefix) && string(key[:len(keyPrefix)]) == keyPrefix) {
 				displayVal := string(val)
-				//if len(displayVal) > 50 {
-				//	displayVal = displayVal[:50] + "..."
-				//}
+				if len(displayVal) > maxLen {
+					displayVal = displayVal[:maxLen]
+				}
 
 				displayKey := string(key)
 				hidePrefix, err := hideKeyPrefix.Get()
@@ -1120,61 +1126,96 @@ func newLogLabel(data binding.String) *fyne.Container {
 }
 
 func adaptiveColumnWidths() {
-	if len(keyValues) == 0 || len(keyValues) > 300 {
-		return
-	}
+	go func() {
+		// 预设列的最大宽度
+		maxKeyWidth := float32(300)
 
-	// 预设列的最大宽度
-	maxKeyWidth := float32(300)
-	maxValueWidth := float32(300)
-
-	// 遍历所有的键值对，计算列的最大宽度
-	for _, keyValue := range keyValues {
-		keyWidth := fyne.MeasureText(keyValue.Key, theme.TextSize(), fyne.TextStyle{}).Width
-		if keyWidth > maxKeyWidth {
-			maxKeyWidth = keyWidth
+		// 遍历所有的键值对，计算列的最大宽度
+		for _, keyValue := range keyValues {
+			keyWidth := float32(len(keyValue.Key)) * oneCharWidth
+			if keyWidth > maxKeyWidth {
+				maxKeyWidth = keyWidth
+			}
 		}
-	}
 
-	// 增加一些额外的空间
-	maxKeyWidth += 10
+		// 增加一些额外的空间
+		maxKeyWidth += 10
 
-	// 设置表格列的宽度
-	keyValueTable.SetColumnWidth(0, maxKeyWidth)
+		// 设置表格列的宽度
+		keyValueTable.SetColumnWidth(0, maxKeyWidth)
 
-	// 计算剩余的宽度并更新值为前缀那么多字
-	remainingWidth := keyValuesTabItem.Size().Width - maxKeyWidth
-	minValueWidth := fyne.MeasureText("W", theme.TextSize(), fyne.TextStyle{}).Width * 30 // 计算30个字符的宽度
+		// 计算剩余的宽度并更新值为前缀那么多字
+		remainingWidth := keyValuesTabItem.Size().Width - maxKeyWidth
+		minValueWidth := oneCharWidth * 30 // 计算30个字符的宽度
 
-	if remainingWidth < minValueWidth {
-		remainingWidth = minValueWidth
-	}
+		if remainingWidth < minValueWidth {
+			remainingWidth = minValueWidth
+		}
 
-	for i, keyValue := range keyValues {
-		value := keyValue.Value
-		prefixValue := truncateToFit(value, remainingWidth)
-		keyValues[i].Value = prefixValue
-	}
+		// 使用WaitGroup来同步Goroutines
+		var wg sync.WaitGroup
 
-	// 更新值列的宽度
-	maxValueWidth = remainingWidth
-	keyValueTable.SetColumnWidth(1, maxValueWidth)
+		updatedKeyValues := make([]KeyValue, len(keyValues))
+
+		results := make(chan KeyValue, len(keyValues))
+
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for _, keyValue := range keyValues {
+				prefixValue := truncateToFit(keyValue.Value, remainingWidth, oneCharWidth)
+				results <- KeyValue{Key: keyValue.Key, Value: prefixValue}
+			}
+		}()
+
+		// 启动一个Goroutine来等待所有任务完成并关闭结果通道
+		go func() {
+			wg.Wait()
+			close(results)
+		}()
+
+		// 从结果通道收集结果并更新到updatedKeyValues中
+		index := 0
+		for result := range results {
+			updatedKeyValues[index] = result
+			index++
+		}
+
+		// 更新值列的宽度
+		maxValueWidth := remainingWidth
+		keyValueTable.SetColumnWidth(1, maxValueWidth)
+
+		// 更新全局变量
+		keyValues = updatedKeyValues
+	}()
 }
 
-// truncateToFit truncates the given string to fit within the specified width
-func truncateToFit(value string, width float32) string {
-	var truncatedValue string
-	space := fyne.MeasureText(" ", theme.TextSize(), fyne.TextStyle{}).Width
-	for i := 1; i <= len(value); i++ {
-		partialValue := value[:i]
-		partialWidth := fyne.MeasureText(partialValue, theme.TextSize(), fyne.TextStyle{}).Width
-		if partialWidth+space > width {
-			truncatedValue = value[:i-1]
-			break
-		}
-		truncatedValue = partialValue
+// truncateToFit truncates the given string to fit within the specified width using binary search
+func truncateToFit(value string, width float32, spaceWidth float32) string {
+	if float32(len(value))*oneCharWidth <= width {
+		return value
 	}
-	return truncatedValue
+
+	low, high := 0, len(value)
+
+	if float32(high)*oneCharWidth <= width {
+		return value
+	}
+
+	low = int(math.Max(float64(low), 20))
+
+	for low < high {
+		mid := (low + high + 1) / 2
+		partialValue := value[:mid]
+		partialWidth := float32(len(partialValue)) * oneCharWidth
+		if partialWidth+spaceWidth > width {
+			high = mid - 1
+		} else {
+			low = mid
+		}
+	}
+
+	return value[:low]
 }
 
 func isPositiveInteger(s string) bool {
